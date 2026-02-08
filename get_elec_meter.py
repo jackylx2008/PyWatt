@@ -5,6 +5,7 @@ import csv
 import os
 import logging
 import mysql.connector
+import time
 from datetime import datetime  # 用于记录时间戳
 from dotenv import load_dotenv
 from logging_config import setup_logger
@@ -23,6 +24,7 @@ START_ADDRESS = int(os.getenv("START_ADDRESS", "0"))
 NUM_REGISTERS = int(os.getenv("NUM_REGISTERS", "10"))
 BYTE_ORDER = os.getenv("BYTE_ORDER", "big")
 REGISTER_ORDER = os.getenv("REGISTER_ORDER", "low_first")
+FETCH_INTERVAL = int(os.getenv("FETCH_INTERVAL", "60"))
 
 
 def load_config(config_path: str) -> dict:
@@ -111,6 +113,7 @@ def save_to_mysql(data_row, headers, mysql_config):
     """
     将数据保存到 MySQL 数据库
     """
+    conn = None
     try:
         # 0. 提取参数并处理端口
         db_host = mysql_config.get("host")
@@ -124,9 +127,13 @@ def save_to_mysql(data_row, headers, mysql_config):
         if str(db_port).startswith("${"):
             db_port = 3306
 
-        # 1. 建立连接 (不带数据库名以创建数据库)
+        # 1. 建立连接 (设置连接超时，增加稳定性)
         conn = mysql.connector.connect(
-            host=db_host, port=int(db_port or 3306), user=db_user, password=db_pwd
+            host=db_host,
+            port=int(db_port or 3306),
+            user=db_user,
+            password=db_pwd,
+            connect_timeout=10,
         )
         cursor = conn.cursor()
 
@@ -168,22 +175,23 @@ def save_to_mysql(data_row, headers, mysql_config):
     except mysql.connector.Error as e:
         logger.error(f"MySQL 存储失败: {e}")
     finally:
-        if "conn" in locals() and conn.is_connected():
+        if conn and conn.is_connected():
             cursor.close()
             conn.close()
 
 
 # --------------------------
-# 主程序
+# 数据采集任务
 # --------------------------
-def main():
-    client = ModbusTcpClient(HOST, port=PORT)
+def fetch_job():
+    # 每次任务独立创建连接，增加鲁棒性
+    client = ModbusTcpClient(HOST, port=PORT, timeout=5)
 
     try:
         # 连接设备
         if not client.connect():
-            raise ConnectionError(f"无法连接到设备 {HOST}:{PORT}")
-        logger.info("设备连接成功")
+            logger.error(f"无法连接到 Modbus 设备 {HOST}:{PORT}")
+            return
 
         # 读取保持寄存器
         response = client.read_holding_registers(
@@ -191,11 +199,14 @@ def main():
         )
 
         if response.isError():
-            raise ModbusException(f"Modbus错误: {response}")
+            logger.error(f"Modbus 读取错误: {response}")
+            return
+
         if len(response.registers) != NUM_REGISTERS:
-            raise ValueError(
-                f"期望读取 {NUM_REGISTERS} 个寄存器，实际返回 {len(response.registers)} 个"
+            logger.error(
+                f"寄存器数量不匹配: 期望 {NUM_REGISTERS}, 实际 {len(response.registers)}"
             )
+            return
 
         registers = response.registers
         logger.debug(f"原始寄存器值: {registers}")
@@ -207,31 +218,15 @@ def main():
                 value = parse_float(registers, i, BYTE_ORDER, REGISTER_ORDER)
                 float_values.append(value)
             except ValueError as e:
-                logger.warning(f"跳过无效数据（寄存器{i} - {i + 1}）: {e}")
+                logger.warning(f"跳过无效数据（寄存器 {i}）: {e}")
                 float_values.append(None)
 
-        # 输出结果（显示设备实际地址，如40001-40002）
-        print("\n解析结果:")
-        for idx, val in enumerate(float_values):
-            reg_start_device = 40001 + 2 * idx  # 设备地址起始（如40001）
-            reg_end_device = reg_start_device + 1  # 设备地址结束（如40002）
-            if val is not None:
-                print(f"寄存器 {reg_start_device}-{reg_end_device}: {val:.4f}")
-            else:
-                print(f"寄存器 {reg_start_device}-{reg_end_device}: <解析失败>")
-
-        valid_values = [v for v in float_values if v is not None]  # 过滤掉解析失败的值
+        valid_values = [v for v in float_values if v is not None]
         sum_total = sum(valid_values)
-        total_count = len(float_values)
-        valid_count = len(valid_values)
-
-        print(f"\n警告: 有 {total_count - valid_count} 个数值解析失败")
-        print(f"有效数值总和 ({valid_count}个): {sum_total:.4f}")
 
         # --------------------------
         # 数据持久化
         # --------------------------
-        # 准备通用表头和数据行
         headers = ["create_time", "total_kwh"]
         for idx in range(len(float_values)):
             reg_start_device = 40001 + 2 * idx
@@ -243,12 +238,9 @@ def main():
             f"{sum_total:.4f}",
         ]
         for val in float_values:
-            if val is not None:
-                row_data.append(f"{val:.4f}")
-            else:
-                row_data.append("")  # 解析失败留空
+            row_data.append(f"{val:.4f}" if val is not None else "")
 
-        # 1. 写入 CSV 文件
+        # 1. 写入 CSV
         file_exists = os.path.exists(CSV_FILE)
         try:
             with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
@@ -256,27 +248,48 @@ def main():
                 if not file_exists:
                     writer.writerow(headers)
                 writer.writerow(row_data)
-            logger.info(f"数据已写入CSV文件: {CSV_FILE}")
+            logger.info(f"数据已同步到 CSV")
         except Exception as e:
-            logger.error(f"写入CSV文件失败: {e}")
+            logger.error(f"CSV 写入失败: {e}")
 
-        # 2. 写入 MySQL 数据库
+        # 2. 写入 MySQL
         mysql_config = CONFIG.get("mysql")
         if mysql_config and mysql_config.get("host"):
             save_to_mysql(row_data, headers, mysql_config)
-        else:
-            logger.warning("未检测到 MySQL 配置，跳过数据库存储")
 
     except Exception as e:
-        logger.error(f"未处理的异常: {e}", exc_info=True)
+        logger.error(f"采集任务执行异常: {e}", exc_info=True)
     finally:
-        # 关闭 Modbus 连接
         try:
             client.close()
-        except Exception as e:
-            logger.warning(f"关闭Modbus连接时出错: {e}")
+        except:
+            pass
 
-        logger.info("连接已关闭")
+
+# --------------------------
+# 主循环控制
+# --------------------------
+def main():
+    logger.info("=" * 40)
+    logger.info("PyWatt 电表采集程序启动 (长期运行模式)")
+    logger.info(f"设备地址: {HOST}:{PORT}")
+    logger.info(f"采集频率: 每 {FETCH_INTERVAL} 秒一次")
+    logger.info("=" * 40)
+
+    try:
+        while True:
+            start_time = time.time()
+            fetch_job()
+
+            # 计算剩余休眠时间，确保频率稳定
+            elapsed = time.time() - start_time
+            sleep_time = max(0.1, FETCH_INTERVAL - elapsed)
+            time.sleep(sleep_time)
+
+    except KeyboardInterrupt:
+        logger.info("程序由用户手动停止")
+    except Exception as e:
+        logger.critical(f"程序遭遇致命错误并退出: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

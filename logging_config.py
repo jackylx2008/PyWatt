@@ -7,6 +7,7 @@
 import logging
 import os
 import sys
+from logging.handlers import RotatingFileHandler
 from typing import Optional
 
 # 动态添加项目根目录到 sys.path
@@ -49,8 +50,15 @@ def setup_logger(
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(logging.Formatter(log_format))
 
-    # 文件日志处理器
-    file_handler = logging.FileHandler(log_file, mode=filemode, encoding="utf-8")
+    # 文件日志处理器（使用滚动记录，防止单个文件过大）
+    # maxBytes=10MB, backupCount=5
+    file_handler = RotatingFileHandler(
+        log_file,
+        mode="a",
+        maxBytes=10 * 1024 * 1024,
+        backupCount=5,
+        encoding="utf-8",
+    )
     file_handler.setFormatter(logging.Formatter(log_format))
 
     # 添加处理器
