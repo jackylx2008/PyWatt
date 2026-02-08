@@ -1,3 +1,4 @@
 pymodbus
 python-dotenv
 PyYAML
+mysql-connector-python

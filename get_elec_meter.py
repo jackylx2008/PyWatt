@@ -4,6 +4,7 @@ import struct
 import csv
 import os
 import logging
+import mysql.connector
 from datetime import datetime  # 用于记录时间戳
 from dotenv import load_dotenv
 from logging_config import setup_logger
@@ -104,6 +105,64 @@ def parse_float(registers, index, byte_order, register_order):
 
 
 # --------------------------
+# 数据库存储工具函数
+# --------------------------
+def save_to_mysql(data_row, headers, mysql_config):
+    """
+    将数据保存到 MySQL 数据库
+    """
+    try:
+        conn = mysql.connector.connect(
+            host=mysql_config.get("host"),
+            port=int(mysql_config.get("port") or 3306),
+            user=mysql_config.get("user"),
+            password=mysql_config.get("password"),
+            database=mysql_config.get("database"),
+        )
+        cursor = conn.cursor()
+
+        table_name = mysql_config.get("table", "elec_meter_data")
+
+        # 1. 动态构建表结构（如果不存在）
+        columns_def = [
+            "id INT AUTO_INCREMENT PRIMARY KEY",
+            "create_time DATETIME",
+            "total_kwh FLOAT",
+        ]
+        for header in headers[2:]:
+            columns_def.append(f"`{header}` FLOAT")
+
+        create_table_sql = (
+            f"CREATE TABLE IF NOT EXISTS `{table_name}` ({', '.join(columns_def)})"
+        )
+        cursor.execute(create_table_sql)
+
+        # 2. 插入数据
+        columns = ["create_time", "total_kwh"] + headers[2:]
+        placeholders = ["%s"] * len(columns)
+        insert_sql = f"INSERT INTO `{table_name}` ({', '.join([f'`{c}`' for c in columns])}) VALUES ({', '.join(placeholders)})"
+
+        # 处理空值为 None (以便存入数据库为 NULL)
+        processed_row = []
+        for val in data_row:
+            if val == "":
+                processed_row.append(None)
+            else:
+                processed_row.append(val)
+
+        cursor.execute(insert_sql, processed_row)
+        conn.commit()
+        logger.info(f"数据已成功保存到 MySQL 数据库: {table_name}")
+
+    except mysql.connector.Error as e:
+        logger.error(f"MySQL 存储失败: {e}")
+    finally:
+        if "conn" in locals() and conn.is_connected():
+            cursor.close()
+            conn.close()
+
+
+# --------------------------
 # 主程序
 # --------------------------
 def main():
@@ -158,36 +217,44 @@ def main():
         print(f"\n警告: 有 {total_count - valid_count} 个数值解析失败")
         print(f"有效数值总和 ({valid_count}个): {sum_total:.4f}")
 
-        # 将结果写入 CSV 文件（追加模式），包含每个寄存器对应的电量值
+        # --------------------------
+        # 数据持久化
+        # --------------------------
+        # 准备通用表头和数据行
+        headers = ["create_time", "total_kwh"]
+        for idx in range(len(float_values)):
+            reg_start_device = 40001 + 2 * idx
+            reg_end_device = reg_start_device + 1
+            headers.append(f"reg_{reg_start_device}_{reg_end_device}")
+
+        row_data = [
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+            f"{sum_total:.4f}",
+        ]
+        for val in float_values:
+            if val is not None:
+                row_data.append(f"{val:.4f}")
+            else:
+                row_data.append("")  # 解析失败留空
+
+        # 1. 写入 CSV 文件
         file_exists = os.path.exists(CSV_FILE)
         try:
             with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
-
-                # 构建表头：时间、总电量 + 每个寄存器对
                 if not file_exists:
-                    header = ["create_time", "total_kwh"]
-                    for idx in range(len(float_values)):
-                        reg_start_device = 40001 + 2 * idx
-                        reg_end_device = reg_start_device + 1
-                        header.append(f"reg_{reg_start_device}_{reg_end_device}")
-                    writer.writerow(header)
-
-                # 构建数据行
-                row = [
-                    datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    f"{sum_total:.4f}",
-                ]
-                for val in float_values:
-                    if val is not None:
-                        row.append(f"{val:.4f}")
-                    else:
-                        row.append("")  # 解析失败留空
-
-                writer.writerow(row)
+                    writer.writerow(headers)
+                writer.writerow(row_data)
             logger.info(f"数据已写入CSV文件: {CSV_FILE}")
         except Exception as e:
             logger.error(f"写入CSV文件失败: {e}")
+
+        # 2. 写入 MySQL 数据库
+        mysql_config = CONFIG.get("mysql")
+        if mysql_config and mysql_config.get("host"):
+            save_to_mysql(row_data, headers, mysql_config)
+        else:
+            logger.warning("未检测到 MySQL 配置，跳过数据库存储")
 
     except Exception as e:
         logger.error(f"未处理的异常: {e}", exc_info=True)
