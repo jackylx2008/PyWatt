@@ -1,5 +1,4 @@
 from pymodbus.client import ModbusTcpClient
-from pymodbus.exceptions import ModbusException
 import struct
 import csv
 import os
@@ -58,8 +57,21 @@ def resolve_log_level(level_name: str) -> int:
 CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 CONFIG = load_config(CONFIG_PATH)
 
-# CSV 文件配置（替代数据库）
-CSV_FILE = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+# CSV 文件配置
+CSV_BASE_PATH = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+
+
+def get_daily_csv_path():
+    """根据当前日期生成 CSV 文件路径，并确保目录存在"""
+    name, ext = os.path.splitext(CSV_BASE_PATH)
+    date_str = datetime.now().strftime("%Y%m%d")
+    path = f"{name}_{date_str}{ext}"
+    # 确保保存目录存在
+    dir_name = os.path.dirname(os.path.abspath(path))
+    if dir_name:
+        os.makedirs(dir_name, exist_ok=True)
+    return path
+
 
 # --------------------------
 # 日志配置
@@ -114,6 +126,7 @@ def save_to_mysql(data_row, headers, mysql_config):
     将数据保存到 MySQL 数据库
     """
     conn = None
+    cursor = None
     try:
         # 0. 提取参数并处理端口
         db_host = mysql_config.get("host")
@@ -158,7 +171,12 @@ def save_to_mysql(data_row, headers, mysql_config):
         # 4. 插入数据
         columns = ["create_time", "total_kwh"] + headers[2:]
         placeholders = ["%s"] * len(columns)
-        insert_sql = f"INSERT INTO `{db_table}` ({', '.join([f'`{c}`' for c in columns])}) VALUES ({', '.join(placeholders)})"
+        column_names = ", ".join([f"`{c}`" for c in columns])
+        values_placeholders = ", ".join(placeholders)
+        insert_sql = (
+            f"INSERT INTO `{db_table}` ({column_names}) "
+            f"VALUES ({values_placeholders})"
+        )
 
         # 处理空值为 None (以便存入数据库为 NULL)
         processed_row = []
@@ -175,8 +193,9 @@ def save_to_mysql(data_row, headers, mysql_config):
     except mysql.connector.Error as e:
         logger.error(f"MySQL 存储失败: {e}")
     finally:
-        if conn and conn.is_connected():
+        if cursor:
             cursor.close()
+        if conn and conn.is_connected():
             conn.close()
 
 
@@ -241,14 +260,15 @@ def fetch_job():
             row_data.append(f"{val:.4f}" if val is not None else "")
 
         # 1. 写入 CSV
-        file_exists = os.path.exists(CSV_FILE)
+        current_csv = get_daily_csv_path()
+        file_exists = os.path.exists(current_csv)
         try:
-            with open(CSV_FILE, mode="a", newline="", encoding="utf-8") as f:
+            with open(current_csv, mode="a", newline="", encoding="utf-8") as f:
                 writer = csv.writer(f)
                 if not file_exists:
                     writer.writerow(headers)
                 writer.writerow(row_data)
-            logger.info(f"数据已同步到 CSV")
+            logger.info(f"数据已同步到 CSV: {os.path.basename(current_csv)}")
         except Exception as e:
             logger.error(f"CSV 写入失败: {e}")
 
@@ -262,7 +282,7 @@ def fetch_job():
     finally:
         try:
             client.close()
-        except:
+        except Exception:
             pass
 
 
