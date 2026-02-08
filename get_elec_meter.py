@@ -112,18 +112,29 @@ def save_to_mysql(data_row, headers, mysql_config):
     将数据保存到 MySQL 数据库
     """
     try:
+        # 0. 提取参数并处理端口
+        db_host = mysql_config.get("host")
+        db_port = mysql_config.get("port")
+        db_user = mysql_config.get("user")
+        db_pwd = mysql_config.get("password")
+        db_name = mysql_config.get("database")
+        db_table = mysql_config.get("table", "elec_meter_data")
+
+        # 处理可能的环境变量占位符
+        if str(db_port).startswith("${"):
+            db_port = 3306
+
+        # 1. 建立连接 (不带数据库名以创建数据库)
         conn = mysql.connector.connect(
-            host=mysql_config.get("host"),
-            port=int(mysql_config.get("port") or 3306),
-            user=mysql_config.get("user"),
-            password=mysql_config.get("password"),
-            database=mysql_config.get("database"),
+            host=db_host, port=int(db_port or 3306), user=db_user, password=db_pwd
         )
         cursor = conn.cursor()
 
-        table_name = mysql_config.get("table", "elec_meter_data")
+        # 2. 创建数据库（如果不存在）
+        cursor.execute(f"CREATE DATABASE IF NOT EXISTS `{db_name}`")
+        cursor.execute(f"USE `{db_name}`")
 
-        # 1. 动态构建表结构（如果不存在）
+        # 3. 动态构建表结构（如果不存在）
         columns_def = [
             "id INT AUTO_INCREMENT PRIMARY KEY",
             "create_time DATETIME",
@@ -133,14 +144,14 @@ def save_to_mysql(data_row, headers, mysql_config):
             columns_def.append(f"`{header}` FLOAT")
 
         create_table_sql = (
-            f"CREATE TABLE IF NOT EXISTS `{table_name}` ({', '.join(columns_def)})"
+            f"CREATE TABLE IF NOT EXISTS `{db_table}` ({', '.join(columns_def)})"
         )
         cursor.execute(create_table_sql)
 
-        # 2. 插入数据
+        # 4. 插入数据
         columns = ["create_time", "total_kwh"] + headers[2:]
         placeholders = ["%s"] * len(columns)
-        insert_sql = f"INSERT INTO `{table_name}` ({', '.join([f'`{c}`' for c in columns])}) VALUES ({', '.join(placeholders)})"
+        insert_sql = f"INSERT INTO `{db_table}` ({', '.join([f'`{c}`' for c in columns])}) VALUES ({', '.join(placeholders)})"
 
         # 处理空值为 None (以便存入数据库为 NULL)
         processed_row = []
@@ -152,7 +163,7 @@ def save_to_mysql(data_row, headers, mysql_config):
 
         cursor.execute(insert_sql, processed_row)
         conn.commit()
-        logger.info(f"数据已成功保存到 MySQL 数据库: {table_name}")
+        logger.info(f"数据已成功保存到 MySQL 数据库: {db_table}")
 
     except mysql.connector.Error as e:
         logger.error(f"MySQL 存储失败: {e}")
