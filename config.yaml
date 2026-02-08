@@ -1,0 +1,5 @@
+# 日志配置
+log_level: ${LOG_LEVEL}  # 日志级别: DEBUG, INFO, WARNING, ERROR, CRITICAL
+
+# CSV 文件配置
+csv_file_path: ${CSV_FILE_PATH}
