@@ -5,6 +5,7 @@ import os
 import logging
 import mysql.connector
 import time
+import msvcrt  # Windows 下用于监听键盘输入
 from datetime import datetime  # 用于记录时间戳
 from dotenv import load_dotenv
 from logging_config import setup_logger
@@ -158,10 +159,10 @@ def save_to_mysql(data_row, headers, mysql_config):
         columns_def = [
             "id INT AUTO_INCREMENT PRIMARY KEY",
             "create_time DATETIME",
-            "total_kwh FLOAT",
+            "total_kwh DECIMAL(16, 4)",
         ]
         for header in headers[2:]:
-            columns_def.append(f"`{header}` FLOAT")
+            columns_def.append(f"`{header}` DECIMAL(16, 4)")
 
         create_table_sql = (
             f"CREATE TABLE IF NOT EXISTS `{db_table}` ({', '.join(columns_def)})"
@@ -294,6 +295,7 @@ def main():
     logger.info("PyWatt 电表采集程序启动 (长期运行模式)")
     logger.info(f"设备地址: {HOST}:{PORT}")
     logger.info(f"采集频率: 每 {FETCH_INTERVAL} 秒一次")
+    logger.info("温馨提示: 在终端按 'q' 或 'Q' 键可安全退出程序")
     logger.info("=" * 40)
 
     try:
@@ -301,13 +303,26 @@ def main():
             start_time = time.time()
             fetch_job()
 
-            # 计算剩余休眠时间，确保频率稳定
+            # 计算剩余休眠时间，并在休眠期间监听键盘
             elapsed = time.time() - start_time
             sleep_time = max(0.1, FETCH_INTERVAL - elapsed)
-            time.sleep(sleep_time)
+
+            # 分段休眠并检测按键，提高响应速度
+            check_interval = 0.5
+            slept = 0
+            while slept < sleep_time:
+                # 检查是否有按键按下
+                if msvcrt.kbhit():
+                    key = msvcrt.getch().decode("utf-8", errors="ignore").lower()
+                    if key == "q":
+                        logger.info("检测到退出按键 'q'，正在停止程序...")
+                        return
+
+                time.sleep(min(check_interval, sleep_time - slept))
+                slept += check_interval
 
     except KeyboardInterrupt:
-        logger.info("程序由用户手动停止")
+        logger.info("程序由用户通过 Ctrl+C 手动停止")
     except Exception as e:
         logger.critical(f"程序遭遇致命错误并退出: {e}", exc_info=True)
 
