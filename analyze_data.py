@@ -112,7 +112,14 @@ def analyze():
     print("-" * 50)
 
     # 查找对应的 CSV 文件
-    csv_base_path = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+    _raw_csv_path = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+    if not os.path.isabs(_raw_csv_path):
+        csv_base_path = os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), _raw_csv_path
+        )
+    else:
+        csv_base_path = _raw_csv_path
+
     name, ext = os.path.splitext(csv_base_path)
     # get_elec_meter.py 中用的格式是 YYYYMMDD
     daily_csv_suffix = full_time.strftime("%Y%m%d")

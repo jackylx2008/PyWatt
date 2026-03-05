@@ -59,7 +59,14 @@ CONFIG_PATH = os.path.join(os.path.dirname(__file__), "config.yaml")
 CONFIG = load_config(CONFIG_PATH)
 
 # CSV 文件配置
-CSV_BASE_PATH = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+_raw_csv_path = CONFIG.get("csv_file_path") or "electric_meter_total.csv"
+if not os.path.isabs(_raw_csv_path):
+    # 如果是相对路径，相对于脚本所在目录
+    CSV_BASE_PATH = os.path.join(
+        os.path.dirname(os.path.abspath(__file__)), _raw_csv_path
+    )
+else:
+    CSV_BASE_PATH = _raw_csv_path
 
 
 def get_daily_csv_path():
